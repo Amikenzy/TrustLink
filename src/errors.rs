@@ -92,4 +92,6 @@ pub enum Error {
     VersionMismatch = 47,
     /// Feature not yet implemented.
     NotImplemented = 48,
+    /// Attestation is not valid (expired, pending, or deleted).
+    AttestationNotValid = 49,
 }

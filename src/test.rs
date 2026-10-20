@@ -7347,6 +7347,74 @@ mod delegation_tests {
     }
 
     #[test]
+    fn cannot_delegate_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, issuer, delegate, _, client) = setup(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+
+        client.pause(&admin);
+        let result = client.try_delegate_claim_type(&issuer, &delegate, &claim, &None);
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    }
+
+    #[test]
+    fn cannot_delegate_invalid_claim_type() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, issuer, delegate, _, client) = setup(&env);
+        let claim = String::from_str(&env, "");
+
+        let result = client.try_delegate_claim_type(&issuer, &delegate, &claim, &None);
+        assert_eq!(result, Err(Ok(Error::InvalidClaimType)));
+    }
+
+    #[test]
+    fn cannot_delegate_to_admin_or_bridge() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, issuer, _, _, client) = setup(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+        let bridge = Address::generate(&env);
+        client.register_bridge(&admin, &bridge);
+
+        let result = client.try_delegate_claim_type(&issuer, &admin, &claim, &None);
+        assert_eq!(result, Err(Ok(Error::Unauthorized)));
+        let result = client.try_delegate_claim_type(&issuer, &bridge, &claim, &None);
+        assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn overwriting_delegation_emits_update_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, issuer, delegate, _, client) = setup(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+
+        let topic0s = |env: &Env| -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+            let mut out = soroban_sdk::Vec::new(env);
+            for (_, topic, _) in env.events().all().iter() {
+                let sym: Result<soroban_sdk::Symbol, _> =
+                    soroban_sdk::TryFromVal::try_from_val(env, &topic.get(0).unwrap());
+                if let Ok(sym) = sym {
+                    out.push_back(sym);
+                }
+            }
+            out
+        };
+
+        client.delegate_claim_type(&issuer, &delegate, &claim, &None);
+        let first = topic0s(&env);
+        assert!(first.contains(soroban_sdk::symbol_short!("del_crtd")));
+        assert!(!first.contains(soroban_sdk::symbol_short!("del_upd")));
+
+        client.delegate_claim_type(&issuer, &delegate, &claim, &None);
+        let second = topic0s(&env);
+        assert!(second.contains(soroban_sdk::symbol_short!("del_upd")));
+        assert!(!second.contains(soroban_sdk::symbol_short!("del_crtd")));
+    }
+
+    #[test]
     fn revoke_nonexistent_delegation_returns_not_found() {
         let env = Env::default();
         env.mock_all_auths();

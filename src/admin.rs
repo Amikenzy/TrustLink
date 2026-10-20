@@ -671,11 +671,20 @@ pub fn delegate_claim_type(
     expiration: Option<u64>,
 ) -> Result<(), Error> {
     issuer.require_auth();
+    Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
+    Validation::validate_claim_type(&claim_type)?;
+    Validation::require_registered_claim_type(env, &claim_type)?;
     if issuer == delegate {
         return Err(Error::CannotDelegateToSelf);
     }
+    // Bridges and admins already hold privileged roles; they must not also
+    // act as sub-issuers.
+    if Storage::is_bridge(env, &delegate) || Storage::is_admin(env, &delegate) {
+        return Err(Error::Unauthorized);
+    }
     crate::attestation::validate_native_expiration(env, expiration)?;
+    let is_update = Storage::get_delegation(env, &issuer, &delegate, &claim_type).is_some();
     let delegation = Delegation {
         delegator: issuer.clone(),
         delegate: delegate.clone(),
@@ -683,7 +692,11 @@ pub fn delegate_claim_type(
         expiration,
     };
     Storage::set_delegation(env, &delegation);
-    Events::delegation_created(env, &issuer, &delegate, &claim_type, expiration);
+    if is_update {
+        Events::delegation_updated(env, &issuer, &delegate, &claim_type, expiration);
+    } else {
+        Events::delegation_created(env, &issuer, &delegate, &claim_type, expiration);
+    }
     Ok(())
 }
 

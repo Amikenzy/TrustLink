@@ -1,4 +1,5 @@
 //! Shared data types and error codes for TrustLink.
+//! Shared data types and error codes for TrustLink.
 //!
 //! This module defines all contract types including:
 //! - Core attestation types (Attestation, AttestationRequest, MultiSigProposal)
@@ -26,6 +27,11 @@ pub enum RequestStatus {
     Fulfilled = 1,
     Rejected = 2,
     Cancelled = 3,
+    /// The request's `expires_at` timestamp has passed without the issuer
+    /// fulfilling or rejecting it. This variant is never stored on-chain;
+    /// it is computed on read inside [`crate::request::get_request`] and
+    /// persisted by [`crate::storage::Storage::cleanup_expired_requests`].
+    Expired = 4,
 }
 
 /// A pull-based attestation request submitted by a subject to a registered issuer.
@@ -105,7 +111,8 @@ pub struct IssuerStats {
 pub enum RevocationListFormat {
     /// Plain list of revoked attestation IDs.
     SimpleList,
-    /// Compact bitstring encoding (Status List 2021 compatible).
+    /// Reserved for compact bitstring encoding (Status List 2021 compatible).
+    /// Currently returns `None` for the bitstring field.
     Bitstring,
 }
 

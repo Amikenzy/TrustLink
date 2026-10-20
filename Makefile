@@ -18,11 +18,11 @@
 #
 # Signing identity
 # ----------------
-# ADMIN_SECRET  — Stellar secret key (S...) used to sign deploy/invoke txns.
-#                 Required for deploy and invoke targets.
-#                 Never hard-code this value; pass it via the environment:
-#                   export ADMIN_SECRET=SXXX...
-#                   make deploy
+# SOURCE        — Stellar key alias passed to stellar CLI.
+#                 The Stellar CLI signs deploy/invoke txns using keys stored locally.
+#                 Set a key alias (e.g., 'deployer') and pass it to deploy/invoke targets:
+#                   make deploy SOURCE=deployer NETWORK=testnet
+#                   make invoke CONTRACT_ID=C... SOURCE=deployer NETWORK=testnet
 #
 # Contract ID
 # -----------
@@ -175,24 +175,24 @@ rollback:
 	@if [ -z "$(WASM_HASH)" ]; then \
 		echo "ERROR: WASM_HASH is required. Example: make rollback NETWORK=mainnet WASM_HASH=<hash>"; \
 		exit 1; \
-	fi; \
+	fi
 	@if [ -z "$(SHA256SUM)" ]; then \
 		echo "ERROR: sha256sum or shasum is required to verify WASM hashes."; \
 		exit 1; \
-	fi; \
-	@echo "Searching for a matching WASM artifact in $(WASM_LOOKUP_DIR)..."; \
+	fi
+	@echo "Searching for a matching WASM artifact in $(WASM_LOOKUP_DIR)..."
 	WASM_FILE=""; \
 	for f in $$(find $(WASM_LOOKUP_DIR) -type f -name '*.wasm' 2>/dev/null); do \
 		HASH=$$($(SHA256SUM) $(SHA256SUM_ARGS) "$$f" | awk '{print $$1}'); \
 		if [ "$$HASH" = "$(WASM_HASH)" ]; then \
 			WASM_FILE="$$f"; break; \
 		fi; \
-	done; \
-	if [ -z "$$WASM_FILE" ]; then \
+	done
+	@if [ -z "$$WASM_FILE" ]; then \
 		echo "ERROR: no compiled WASM artifact found matching hash $(WASM_HASH)."; \
 		echo "Restore or build the matching WASM artifact and retry."; \
 		exit 1; \
-	fi; \
+	fi
 	@if [ "$(NETWORK)" = "mainnet" ]; then \
 		echo "WARNING: mainnet rollback is sensitive. This will redeploy WASM hash $(WASM_HASH) to mainnet."; \
 		printf "Type 'ROLLBACK' to confirm: "; \
@@ -201,9 +201,9 @@ rollback:
 			echo "Aborted rollback."; \
 			exit 1; \
 		fi; \
-	fi; \
-	@echo "Rolling back with artifact: $$WASM_FILE"; \
-	soroban contract deploy --wasm "$$WASM_FILE" --network $(NETWORK)
+	fi
+	@echo "Rolling back with artifact: $$WASM_FILE"
+	stellar contract deploy --wasm "$$WASM_FILE" --network $(NETWORK)
 
 ## Clean build artifacts and compiled outputs
 clean:
@@ -256,7 +256,7 @@ check-error-variants:
 SOURCE ?= deployer
 
 ## Build, optimize, and deploy the contract to NETWORK.
-## Requires: ADMIN_SECRET exported in the environment; SOURCE set to a key alias.
+## Requires: SOURCE set to a locally-registered Stellar key alias.
 ## After deploy, note the printed CONTRACT_ID and run: make verify CONTRACT_ID=... SOURCE=...
 deploy: optimize
 ifeq ($(NETWORK),mainnet)

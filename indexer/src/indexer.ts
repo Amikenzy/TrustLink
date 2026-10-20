@@ -14,6 +14,7 @@ import {
   setIssuerRateLimitRatio,
   issuersTotal,
   EventTypes,
+  type EventType,
 } from "./metrics";
 import { dispatchWebhooks } from "./webhooks";
 import { scheduleArchivalJob } from "./archival";
@@ -27,6 +28,9 @@ const RPC_URL = process.env.RPC_URL ?? "https://soroban-testnet.stellar.org";
 const START_LEDGER = process.env.START_LEDGER
   ? parseInt(process.env.START_LEDGER, 10)
   : undefined;
+const GENESIS_LEDGER = process.env.GENESIS_LEDGER
+  ? parseInt(process.env.GENESIS_LEDGER, 10)
+  : 0;
 const PAGE_LIMIT = 200;
 const POLL_MS = 5_000;
 // Maximum number of entity-key partitions processed in parallel.
@@ -86,6 +90,10 @@ const WATCHED = new Set([
   // "paused", "unpaused" => skipped
   // Rate-limit config
   "rate_limit_set", // #775
+  "wl_add",
+  "wl_rem",
+  "wl_on",
+  "wl_off",
 ]);
 
 import { getLastLedger, setLastLedger } from "./indexer-state";
@@ -127,6 +135,9 @@ export async function startIndexer(db: PrismaClient, redis: Redis | null = null)
     logger.info({ cursor, tip }, "Backfilling ledgers");
     try {
       cursor = await processRange(db, rpc, cursor, tip, redis);
+      // Update lag during backfill
+      const { sequence: latestAfterBackfill } = await rpc.getLatestLedger();
+      indexerLagLedgers.set(Math.max(0, latestAfterBackfill - cursor));
     } catch (err) {
       console.error("Error during backfill:", err);
     }
@@ -139,7 +150,9 @@ export async function startIndexer(db: PrismaClient, redis: Redis | null = null)
     const { sequence: latest } = await rpc.getLatestLedger();
     if (cursor <= latest) {
       cursor = await processRange(db, rpc, cursor, latest, redis);
-      indexerLagLedgers.set(latest - cursor);
+      // Compute lag against the current tip after processing
+      const { sequence: latestTipNow } = await rpc.getLatestLedger();
+      indexerLagLedgers.set(Math.max(0, latestTipNow - cursor));
     }
   }
 }
@@ -198,6 +211,7 @@ function partitionKey(ev: SorobanRpc.Api.EventResponse): string {
 }
 
 async function processRange(
+export async function processRange(
   db: PrismaClient,
   rpc: SorobanRpc.Server,
   from: number,
@@ -359,6 +373,84 @@ export async function handleEvent(
       });
       return;
     }
+  eventsProcessedTotal.inc();
+  const data = scValToNative(ev.value) as unknown[];
+
+  // ── Attestation request lifecycle events ──────────────────────────────────
+  //
+  // att_req  topics=[att_req, issuer]  data=[request_id, subject, claim_type, expires_at]
+  // req_ok   topics=[req_ok, issuer]   data=[request_id, attestation_id]
+  // req_no   topics=[req_no, issuer]   data=[request_id, reason]
+  // req_cncl topics=[req_cncl,subject] data=request_id
+  // req_exp  topics=[req_exp, issuer]  data=[request_id, subject, expires_at]
+
+  if (topicStr === "att_req") {
+    const issuerAddr = ev.topic[1] ? String(scValToNative(ev.topic[1])) : "";
+    const [requestId, subjectAddr, claimType, expiresAt] = data as [string, string, string, bigint];
+    const requestedAt = BigInt(ev.ledger);
+    await db.attestationRequest.upsert({
+      where: { id: requestId },
+      update: {},
+      create: {
+        id: requestId,
+        subject: subjectAddr,
+        issuer: issuerAddr,
+        claimType: String(claimType),
+        requestedAt,
+        expiresAt: BigInt(expiresAt),
+        status: "PENDING",
+      },
+    });
+    return;
+  }
+
+  if (topicStr === "req_ok") {
+    const [requestId, attestationId] = data as [string, string];
+    await db.attestationRequest.updateMany({
+      where: { id: requestId, status: "PENDING" },
+      data: { status: "FULFILLED", fulfillmentId: attestationId },
+    });
+    return;
+  }
+
+  if (topicStr === "req_no") {
+    const [requestId, reason] = data as [string, string | null];
+    await db.attestationRequest.updateMany({
+      where: { id: requestId, status: "PENDING" },
+      data: { status: "REJECTED", rejectionReason: reason ?? null },
+    });
+    return;
+  }
+
+  if (topicStr === "req_cncl") {
+    const requestId = String(data[0]);
+    await db.attestationRequest.updateMany({
+      where: { id: requestId, status: "PENDING" },
+      data: { status: "CANCELLED" },
+    });
+    return;
+  }
+
+  if (topicStr === "req_exp") {
+    // data = [request_id, subject, expires_at]
+    // Transitions PENDING → EXPIRED. Uses updateMany so replaying is a no-op.
+    const requestId = String(data[0]);
+    await db.attestationRequest.updateMany({
+      where: { id: requestId, status: "PENDING" },
+      data: { status: "EXPIRED" },
+    });
+    return;
+  }
+
+  // ── Multi-sig events ───────────────────────────────────────────────────────
+
+  if (topicStr === "ms_prop") {
+    const proposalId = String(data[0]);
+    const proposer = String(data[1]);
+    const threshold = Number(data[2]);
+    const subject = ev.topic[1] ? String(scValToNative(ev.topic[1])) : "";
+    // claimType is not in the event; default to empty string — updated via ms_sign if needed
+    const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60);
 
     if (topicStr === "ms_sign") {
       const proposalId = String(data[0]);
@@ -448,6 +540,34 @@ export async function handleEvent(
       await cacheInvalidate(redis, `issuerStats:${issuerAddress}`);
       return;
     }
+  // ── #1577: Whitelist events ────────────────────────────────────────────────
+
+  if (topicStr === "wl_add" || topicStr === "wl_rem") {
+    const issuerAddr = ev.topic[1] ? String(scValToNative(ev.topic[1])) : "";
+    const subjectAddr = String(data[0]);
+    const added = topicStr === "wl_add";
+
+    await db.whitelistEntry.upsert({
+      where: { issuer_subject: { issuer: issuerAddr, subject: subjectAddr } },
+      update: { added },
+      create: { issuer: issuerAddr, subject: subjectAddr, added },
+    });
+    return;
+  }
+
+  if (topicStr === "wl_on" || topicStr === "wl_off") {
+    const issuerAddr = ev.topic[1] ? String(scValToNative(ev.topic[1])) : "";
+    const enabled = topicStr === "wl_on";
+
+    await db.issuer.upsert({
+      where: { address: issuerAddr },
+      update: { whitelistEnabled: enabled },
+      create: { address: issuerAddr, whitelistEnabled: enabled },
+    });
+    return;
+  }
+
+  // ── Issuer registration (for cache invalidation) ───────────────────────────
 
     // #1593: iss_rem — mark issuer as removed (tier "removed") so they are no
     // longer listed as active issuers while preserving history.
@@ -859,8 +979,8 @@ async function routeToDeadLetter(
 }
 
 // Map raw event topics to normalized event type labels
-function normalizeEventType(topic: string): string | null {
-  const mapping: Record<string, string> = {
+function normalizeEventType(topic: string): EventType | null {
+  const mapping: Record<string, EventType> = {
     created: EventTypes.CREATED,
     imported: EventTypes.IMPORTED,
     bridged: EventTypes.BRIDGED,
@@ -878,6 +998,11 @@ function normalizeEventType(topic: string): string | null {
     ms_actv: EventTypes.MULTISIG_ACTIVATED,
     adm_init: EventTypes.ADMIN_INIT,
     adm_xfer: EventTypes.ADMIN_TRANSFER,
+    att_req:  EventTypes.REQUEST_EXPIRED, // reuse bucket — request events share metrics
+    req_ok:   EventTypes.REQUEST_EXPIRED,
+    req_no:   EventTypes.REQUEST_EXPIRED,
+    req_cncl: EventTypes.REQUEST_EXPIRED,
+    req_exp:  EventTypes.REQUEST_EXPIRED,
   };
   return mapping[topic] ?? null;
 }

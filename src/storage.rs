@@ -20,13 +20,15 @@ pub enum StorageKey {
     TtlConfig,
     ContractConfig,
     Issuer(Address),
+    /// Issuer tier metadata.
+    IssuerMetadata(Address),
+    /// Full [`Attestation`] record keyed by its ID.
     Bridge(Address),
     /// Ordered list of all registered bridge addresses.
     BridgeList,
     Attestation(String),
     SubjectAttestations(Address),
     IssuerAttestations(Address),
-    IssuerMetadata(Address),
     SubjectAttestationChunk(Address, u32),
     IssuerAttestationChunk(Address, u32),
     ClaimType(String),
@@ -95,26 +97,6 @@ pub enum StorageKey {
     /// Cumulative revocation count for an issuer (used in confidence scoring).
     IssuerRevocations(Address),
 }
-
-// TODO: Issue #918 - The following StorageKey variants need to be added:
-// These require refactoring due to soroban contracttype macro variant limit (~52 variants max):
-// - BridgeList
-// - ValidAttestations(Address)
-// - PendingAdminTransfer
-// - CouncilProposal(u32)
-// - Dispute(String)
-// - Delegation(Address, Address, String)
-// - DelegatorIndex(Address)
-// - AttestationTemplate(Address, String)
-// - AttestationTemplateList(Address)
-// - DecayConfig
-// - CouncilTimelockDelay
-// - EndorserIndex(Address)
-// - ClaimTypeCount(String)
-// - IssuerRevocations(Address)
-// - ClaimTypeRateLimit(String)
-// - ProposalCounter
-// Potential solutions: composite key approach like ClaimTypeIssuanceKey, or splitting into multiple enums
 
 /// Composite key for per-issuer-per-claim-type last issuance timestamps.
 /// Stored as a separate `contracttype` struct so it doesn't count against
@@ -292,10 +274,22 @@ impl Storage {
         env.storage().persistent().has(&StorageKey::Issuer(address.clone()))
     }
 
+    /// Add `issuer` to the registry and refresh its TTL. Also initialize with Basic tier.
     pub fn add_issuer(env: &Env, issuer: &Address) {
         let key = StorageKey::Issuer(issuer.clone());
         let ttl = get_ttl_lifetime(env);
         env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(&key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
+        
+        // Initialize issuer metadata with Basic tier
+        let metadata = crate::types::IssuerMetadata {
+            name: String::from_str(env, ""),
+            url: String::from_str(env, ""),
+            description: String::from_str(env, ""),
+        };
+        let metadata_key = StorageKey::IssuerMetadata(issuer.clone());
+        env.storage().persistent().set(&metadata_key, &metadata);
+        env.storage().persistent().extend_ttl(&metadata_key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
         // Maintain ordered IssuerList
         let mut list = Self::get_issuer_list(env);
@@ -312,6 +306,27 @@ impl Storage {
 
     pub fn remove_issuer(env: &Env, issuer: &Address) {
         env.storage().persistent().remove(&StorageKey::Issuer(issuer.clone()));
+        env.storage().persistent().remove(&StorageKey::IssuerMetadata(issuer.clone()));
+    }
+
+    /// Get the issuer metadata (tier).
+    pub fn get_issuer_metadata(env: &Env, issuer: &Address) -> Result<IssuerMetadata, Error> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::IssuerMetadata(issuer.clone()))
+            .ok_or(Error::NotFound)
+    }
+
+    /// Set the issuer tier and refresh TTL.
+    pub fn set_issuer_tier(env: &Env, issuer: &Address, tier: IssuerTier) -> Result<(), Error> {
+        if !Self::is_issuer(env, issuer) {
+            return Err(Error::NotFound);
+        }
+        let key = StorageKey::IssuerMetadata(issuer.clone())
+        env.storage().persistent().set(&key, &metadata);
+        env.storage().persistent().extend_ttl(&key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
+        
+        Ok(())
         // Remove from IssuerList
         let existing = Self::get_issuer_list(env);
         let mut updated = Vec::new(env);
@@ -484,6 +499,10 @@ impl Storage {
         env.storage().persistent().get(&StorageKey::ClaimTypeConstraints(claim_type.clone()))
     }
 
+    pub fn remove_claim_type_constraints(env: &Env, claim_type: &String) {
+        env.storage().persistent().remove(&StorageKey::ClaimTypeConstraints(claim_type.clone()));
+    }
+
     pub fn set_whitelist_mode(env: &Env, issuer: &Address, enabled: bool) {
         let key = StorageKey::IssuerWhitelistMode(issuer.clone());
         let ttl = get_ttl_lifetime(env);
@@ -529,18 +548,6 @@ impl Storage {
 
     pub fn remove_from_whitelist(env: &Env, issuer: &Address, subject: &Address) {
         env.storage().persistent().remove(&StorageKey::IssuerWhitelist(issuer.clone(), subject.clone()));
-    }
-
-    pub fn is_subject_whitelisted(env: &Env, issuer: &Address, subject: &Address) -> bool {
-        Self::is_whitelisted(env, issuer, subject)
-    }
-
-    pub fn add_subject_to_whitelist(env: &Env, issuer: &Address, subject: &Address) {
-        Self::add_to_whitelist(env, issuer, subject);
-    }
-
-    pub fn remove_subject_from_whitelist(env: &Env, issuer: &Address, subject: &Address) {
-        Self::remove_from_whitelist(env, issuer, subject);
     }
 
     pub fn set_paused(env: &Env, paused: bool) {
@@ -868,9 +875,23 @@ impl Storage {
         let existing = Self::get_pending_request_ids(env, issuer);
         let mut updated = Vec::new(env);
         for id in existing.iter() {
-            if let Ok(req) = Self::get_request(env, &id) {
+            if let Ok(mut req) = Self::get_request(env, &id) {
                 if current_time < req.expires_at {
                     updated.push_back(id);
+                } else {
+                    // Persist the Expired status so that get_request returns
+                    // RequestStatus::Expired rather than the stale Pending value.
+                    req.status = crate::types::RequestStatus::Expired;
+                    let req_key = StorageKey::AttestationRequest(req.id.clone());
+                    env.storage().persistent().set(&req_key, &req);
+                    env.storage().persistent().extend_ttl(&req_key, ttl, ttl);
+                    crate::events::Events::request_expired(
+                        env,
+                        &req.id,
+                        issuer,
+                        &req.subject,
+                        req.expires_at,
+                    );
                 }
             }
         }

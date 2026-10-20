@@ -3,7 +3,7 @@ use soroban_sdk::{token::TokenClient, Address, Env, String, Vec};
 use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{
-    AdminCouncil, ClaimTypeInfo, ContractConfig, CouncilOperation, CouncilProposal, DecayConfig,
+    AdminCouncil, AttestationStatus, ClaimTypeInfo, ContractConfig, CouncilOperation, CouncilProposal, DecayConfig,
     Delegation, DisputeRecord, Error, ExpirationHook, FeeConfig, IssuerMetadata, IssuerStats,
     IssuerTier, PendingAdminTransfer, RateLimitConfig, StorageLimits, TtlConfig,
 };
@@ -196,6 +196,13 @@ pub fn get_confidence_score(env: &Env, attestation_id: String) -> Option<u32> {
     use crate::constants::SECS_PER_DAY;
 
     let attestation = Storage::get_attestation(env, &attestation_id).ok()?;
+    // Only currently valid attestations are scored. Deleted ones return None so
+    // the score does not reveal that they exist.
+    if attestation.deleted
+        || !matches!(attestation.get_status(env.ledger().timestamp()), AttestationStatus::Valid)
+    {
+        return None;
+    }
     let tier_score = match Storage::get_issuer_tier(env, &attestation.issuer) {
         Some(IssuerTier::Premium) => 90u32,
         Some(IssuerTier::Verified) => 60u32,

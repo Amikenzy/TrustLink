@@ -5534,6 +5534,75 @@ mod issuer_tier_tests {
         client.set_issuer_tier(&admin, &issuer, &types::IssuerTier::Basic);
         assert_eq!(client.get_issuer_tier(&issuer), Some(types::IssuerTier::Basic));
     }
+
+    /// Revoked attestations have no score, even from a Premium issuer.
+    #[test]
+    fn test_confidence_score_none_for_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, issuer, client) = setup(&env);
+        let subject = Address::generate(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+        client.set_issuer_tier(&admin, &issuer, &types::IssuerTier::Premium);
+
+        let id = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        assert_eq!(client.get_confidence_score(&id), Some(90));
+
+        client.revoke_attestation(&issuer, &id, &None);
+        assert_eq!(client.get_confidence_score(&id), None);
+    }
+
+    /// Expired attestations have no score.
+    #[test]
+    fn test_confidence_score_none_for_expired() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        let (_, issuer, client) = setup(&env);
+        let subject = Address::generate(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+
+        let id = client.create_attestation(&issuer, &subject, &claim, &Some(2_000), &None, &None);
+        assert_eq!(client.get_confidence_score(&id), Some(30));
+
+        env.ledger().set_timestamp(2_000);
+        assert_eq!(client.get_confidence_score(&id), None);
+    }
+
+    /// Pending attestations (valid_from in the future) have no score.
+    #[test]
+    fn test_confidence_score_none_for_pending() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        let (_, issuer, client) = setup(&env);
+        let subject = Address::generate(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+
+        let id = client.create_attestation_valid_from(
+            &issuer, &subject, &claim, &None, &None, &None, &1_500,
+        );
+        assert_eq!(client.get_confidence_score(&id), None);
+
+        env.ledger().set_timestamp(1_500);
+        assert_eq!(client.get_confidence_score(&id), Some(30));
+    }
+
+    /// Deleted attestations have no score, so the call does not confirm they exist.
+    #[test]
+    fn test_confidence_score_none_for_deleted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, issuer, client) = setup(&env);
+        let subject = Address::generate(&env);
+        let claim = String::from_str(&env, "KYC_PASSED");
+
+        let id = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        client.request_deletion(&subject, &id);
+        assert_eq!(client.get_confidence_score(&id), None);
+    }
 }
 
 // ── valid_from / Pending lifecycle tests ─────────────────────────────────────

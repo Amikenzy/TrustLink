@@ -12186,6 +12186,38 @@ fn test_get_bundle_attestations_all_share_bundle_id() {
     }
 }
 
+#[test]
+fn test_bundle_with_duplicate_claim_types_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_, issuer, client) = setup(&env);
+    let subject = Address::generate(&env);
+
+    let claim_types = soroban_sdk::Vec::from_array(
+        &env,
+        [
+            String::from_str(&env, "KYC_PASSED"),
+            String::from_str(&env, "ACCREDITED_INVESTOR"),
+            String::from_str(&env, "KYC_PASSED"),
+        ],
+    );
+
+    let result = client.try_create_attestation_bundle(
+        &issuer,
+        &subject,
+        &claim_types,
+        &None,
+        &None,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(Error::DuplicateInput)));
+
+    // Nothing was written.
+    assert_eq!(client.get_subject_bundles(&subject).len(), 0);
+    assert_eq!(client.get_issuer_bundles(&issuer).len(), 0);
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Property-based tests for attestation ID stability
 // ══════════════════════════════════════════════════════════════════════════════

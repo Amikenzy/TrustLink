@@ -6,8 +6,8 @@
 use soroban_sdk::{xdr::ToXdr, Env, Address, String, Vec, Bytes};
 
 use crate::attestation::{
-    store_attestation, charge_attestation_fee, check_rate_limit,
-    validate_native_expiration, validate_tags, validate_jurisdiction,
+    store_attestation, charge_attestation_fees, check_rate_limit,
+    validate_native_expiration, validate_tags,
 };
 use crate::storage::Storage;
 use crate::types::{
@@ -85,6 +85,11 @@ pub fn create_attestation_bundle(
     // Validate metadata and tags (once, shared for all in bundle)
     Validation::validate_metadata(env, &metadata)?;
     Validation::validate_metadata_hash_only(env, &metadata)?;
+
+    // The shared metadata must satisfy every claim type's constraints.
+    for claim_type in claim_types.iter() {
+        Validation::validate_claim_constraints(env, &claim_type, &metadata)?;
+    }
     validate_tags(&tags)?;
     validate_native_expiration(env, expiration)?;
 
@@ -231,10 +236,8 @@ pub fn create_attestation_bundle(
     Storage::add_issuer_bundle(env, &issuer, &bundle_id);
     Storage::add_subject_bundle(env, &subject, &bundle_id);
 
-    // Charge fees for all attestations in the bundle
-    for _ in 0..bundle_size {
-        charge_attestation_fee(env, &issuer)?;
-    }
+    // Charge fees for all attestations in the bundle with one token transfer
+    charge_attestation_fees(env, &issuer, bundle_size)?;
 
     // Emit bundle_created event
     crate::events::Events::bundle_created(env, &bundle);

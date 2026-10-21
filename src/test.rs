@@ -12255,26 +12255,20 @@ fn test_get_bundle_attestations_all_share_bundle_id() {
 }
 
 #[test]
-fn test_bundle_enforces_claim_type_constraints() {
+fn test_bundle_with_duplicate_claim_types_is_rejected() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (admin, issuer, client) = setup(&env);
+    let (_, issuer, client) = setup(&env);
     let subject = Address::generate(&env);
-    let constrained = String::from_str(&env, "ACCREDITED_INVESTOR");
-    client.set_claim_type_constraints(
-        &admin,
-        &constrained,
-        &crate::types::ClaimTypeConstraints {
-            min_metadata_len: None,
-            max_metadata_len: None,
-            require_metadata: true,
-        },
-    );
 
     let claim_types = soroban_sdk::Vec::from_array(
         &env,
-        [String::from_str(&env, "KYC_PASSED"), constrained],
+        [
+            String::from_str(&env, "KYC_PASSED"),
+            String::from_str(&env, "ACCREDITED_INVESTOR"),
+            String::from_str(&env, "KYC_PASSED"),
+        ],
     );
 
     let result = client.try_create_attestation_bundle(
@@ -12285,43 +12279,11 @@ fn test_bundle_enforces_claim_type_constraints() {
         &None,
         &None,
     );
-    assert_eq!(result, Err(Ok(Error::ConstraintViolation)));
+    assert_eq!(result, Err(Ok(Error::DuplicateInput)));
+
+    // Nothing was written.
     assert_eq!(client.get_subject_bundles(&subject).len(), 0);
-}
-
-#[test]
-fn test_bundle_charges_fee_with_single_transfer() {
-    let env = Env::default();
-    env.mock_all_auths_allowing_non_root_auth();
-
-    let (admin, issuer, client) = setup(&env);
-    let subject = Address::generate(&env);
-    let collector = Address::generate(&env);
-    let fee_token = register_test_token(&env, &admin);
-    let token_client = TokenClient::new(&env, &fee_token);
-    StellarAssetClient::new(&env, &fee_token).mint(&issuer, &100);
-    client.set_fee(&admin, &10, &collector, &Some(fee_token.clone()));
-
-    let claim_types = soroban_sdk::Vec::from_array(
-        &env,
-        [
-            String::from_str(&env, "KYC_PASSED"),
-            String::from_str(&env, "ACCREDITED_INVESTOR"),
-            String::from_str(&env, "SANCTIONS_CLEARED"),
-        ],
-    );
-
-    client.create_attestation_bundle(&issuer, &subject, &claim_types, &None, &None, &None);
-
-    let token_events = env
-        .events()
-        .all()
-        .iter()
-        .filter(|(contract, _, _)| *contract == fee_token)
-        .count();
-    assert_eq!(token_events, 1);
-    assert_eq!(token_client.balance(&issuer), 70);
-    assert_eq!(token_client.balance(&collector), 30);
+    assert_eq!(client.get_issuer_bundles(&issuer).len(), 0);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

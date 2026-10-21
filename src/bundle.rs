@@ -76,6 +76,18 @@ pub fn create_attestation_bundle(
         return Err(Error::LimitExceeded);
     }
 
+    // Reject repeated claim types: they hash to the same attestation ID and
+    // would overwrite each other while indexes, stats and fees apply twice.
+    // O(n²) is fine for n <= MAX_BUNDLE_SIZE.
+    for i in 0..claim_types.len() {
+        let claim_type = claim_types.get_unchecked(i);
+        for j in (i + 1)..claim_types.len() {
+            if claim_types.get_unchecked(j) == claim_type {
+                return Err(Error::DuplicateInput);
+            }
+        }
+    }
+
     // Validate all claim types are registered before starting
     for claim_type in claim_types.iter() {
         Validation::validate_claim_type(&claim_type)?;

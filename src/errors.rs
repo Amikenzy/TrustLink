@@ -94,4 +94,9 @@ pub enum Error {
     NotImplemented = 48,
     /// Attestation is not valid (expired, pending, or deleted).
     AttestationNotValid = 49,
+    /// Invalid configuration value (e.g., min > max for constraints).
+    InvalidConfigValue = 49,
+    /// An input list contains the same entry more than once (e.g. a repeated
+    /// claim type in `create_attestation_bundle`).
+    DuplicateInput = 50,
 }

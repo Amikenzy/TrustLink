@@ -177,12 +177,25 @@ pub fn load_fee_config(env: &Env) -> Result<FeeConfig, Error> {
 }
 
 pub fn charge_attestation_fee(env: &Env, issuer: &Address) -> Result<(), Error> {
+    charge_attestation_fees(env, issuer, 1)
+}
+
+/// Charge the fee for `count` attestations with a single token transfer.
+///
+/// # Errors
+/// - [`Error::InvalidFee`] — `attestation_fee * count` overflows.
+/// - [`Error::FeeTokenRequired`] — a fee is set but no fee token is configured.
+pub fn charge_attestation_fees(env: &Env, issuer: &Address, count: u32) -> Result<(), Error> {
     let fee_config = load_fee_config(env)?;
-    if fee_config.attestation_fee == 0 {
+    if fee_config.attestation_fee == 0 || count == 0 {
         return Ok(());
     }
+    let total = fee_config
+        .attestation_fee
+        .checked_mul(count as i128)
+        .ok_or(Error::InvalidFee)?;
     let fee_token = fee_config.fee_token.ok_or(Error::FeeTokenRequired)?;
-    TokenClient::new(env, &fee_token).transfer(issuer, &fee_config.fee_collector, &fee_config.attestation_fee);
+    TokenClient::new(env, &fee_token).transfer(issuer, &fee_config.fee_collector, &total);
     Ok(())
 }
 
